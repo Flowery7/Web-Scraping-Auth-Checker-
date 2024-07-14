@@ -1,0 +1,154 @@
+import requests
+from urllib.parse import urlparse, urljoin
+from bs4 import BeautifulSoup
+import time
+
+def fetch_robots_txt(url):
+    try:
+        if not url.startswith(('http://', 'https://')):
+            print("Error: URL must start with 'http://' or 'https://'.")
+            return None
+
+        parsed_url = urlparse(url)
+        base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        robots_url = urljoin(base_url, '/robots.txt')
+        response = requests.get(robots_url)
+        
+        if response.status_code == 200:
+            return response.text
+        else:
+            print(f"robots.txt not found at {robots_url}")
+            return None
+    except Exception as e:
+        print(f"Error fetching robots.txt: {e}")
+        return None
+
+def parse_robots_txt(robots_txt):
+    rules = {}
+    current_user_agent = None
+
+    for line in robots_txt.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.lower().startswith('user-agent:'):
+            current_user_agent = line.split(':', 1)[1].strip()
+            rules[current_user_agent] = []
+        elif current_user_agent:
+            directive, path = line.split(':', 1)
+            directive = directive.strip().lower()
+            path = path.strip()
+            rules[current_user_agent].append((directive, path))
+    return rules
+
+def can_scrape(rules, user_agent='*'):
+    if user_agent in rules:
+        user_rules = rules[user_agent]
+    elif '*' in rules:
+        user_rules = rules['*']
+    else:
+        return True
+    for directive, path in user_rules:
+        if directive == 'disallow' and path == '/':
+            return False
+    return True
+
+def print_rules(rules):
+    for user_agent, directives in rules.items():
+        print(f"User-agent: {user_agent}")
+        for directive, path in directives:
+            print(f"  {directive.capitalize()}: {path}")
+        print()
+
+def check_scraping_permission(url, user_agent='*'):
+    robots_txt = fetch_robots_txt(url)
+    if not robots_txt:
+        print("No robots.txt found, scraping is allowed by default.")
+        return True
+    
+    rules = parse_robots_txt(robots_txt)
+    print("Parsed rules from robots.txt:")
+    print_rules(rules)
+    
+    if can_scrape(rules, user_agent):
+        print(f"Scraping is allowed for user-agent '{user_agent}'.")
+        return True
+    else:
+        print(f"Scraping is not allowed for user-agent '{user_agent}'.")
+        return False
+
+def is_disallowed(url, base_url, rules, user_agent='*'):
+    parsed_url = urlparse(url)
+    path = parsed_url.path
+    
+    if user_agent in rules:
+        user_rules = rules[user_agent]
+    elif '*' in rules:
+        user_rules = rules['*']
+    else:
+        return False
+
+    for directive, rule_path in user_rules:
+        if directive == 'disallow':
+            if path.startswith(rule_path):
+                return True
+    return False
+
+def get_links(url, soup):
+    links = set()
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag['href']
+        href = urljoin(url, href)
+        parsed_href = urlparse(href)
+        if parsed_href.scheme in ['http', 'https']:
+            links.add(href)
+    return links
+
+def crawl_website(base_url, rules, user_agent='*', max_depth=2):
+    visited = set()
+    to_visit = {base_url}
+    depth = 0
+
+    while to_visit and depth <= max_depth:
+        current_url = to_visit.pop()
+        if current_url in visited:
+            continue
+
+        if is_disallowed(current_url, base_url, rules, user_agent):
+            print(f"Disallowed: {current_url}")
+            continue
+        else:
+            print(f"Allowed: {current_url}")
+
+        visited.add(current_url)
+        try:
+            response = requests.get(current_url)
+            if response.status_code != 200:
+                continue
+            soup = BeautifulSoup(response.text, 'html.parser')
+            links = get_links(current_url, soup)
+            to_visit.update(links - visited)
+        except requests.RequestException as e:
+            print(f"Error fetching {current_url}: {e}")
+        time.sleep(1)  # Respectful delay to avoid hammering the server
+        depth += 1
+    return visited
+
+# Main function to prompt user for input and crawl the website
+def main():
+    website_url = input("Enter the website URL: ").strip()
+    if not check_scraping_permission(website_url, user_agent='*'):
+        print("Scraping is not allowed. Exiting.")
+        return
+    
+    robots_txt = fetch_robots_txt(website_url)
+    if robots_txt:
+        rules = parse_robots_txt(robots_txt)
+    else:
+        rules = {}
+
+    pages = crawl_website(website_url, rules)
+    print(f"Crawled {len(pages)} pages:")
+
+if __name__ == "__main__":
+    main()
